@@ -42,7 +42,7 @@ export function useWorkbench(options: UseWorkbenchOptions) {
 
   // UI state that should be in components, not composable
   // Kept for backward compatibility but marked for future migration
-  const rightPanel = ref<'bible' | 'knowledge'>('knowledge')
+  const rightPanel = ref<'bible' | 'knowledge'>('bible')
   const biblePanelKey = ref(0)
   const showPlanModal = ref(false)
   const planMode = ref<'initial' | 'revise'>('initial')

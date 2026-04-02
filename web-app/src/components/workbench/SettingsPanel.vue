@@ -53,7 +53,7 @@ interface Props {
 }
 
 withDefaults(defineProps<Props>(), {
-  currentPanel: 'knowledge',
+  currentPanel: 'bible',
   bibleKey: 0,
   currentChapter: null,
 })
