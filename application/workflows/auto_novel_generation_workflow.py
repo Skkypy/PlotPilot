@@ -325,21 +325,33 @@ class AutoNovelGenerationWorkflow:
         Returns:
             Prompt 对象
         """
-        system_message = f"""You are a professional novelist. Use the following context to write the chapter.
+        system_message = f"""你是一位专业的网络小说作家。根据以下上下文撰写章节内容。
 
 {context}
 
-Write naturally and maintain consistency with the established context."""
+写作要求：
+1. 必须有多个人物互动（至少2-3个角色出场）
+2. 必须有对话（不能只有独白和叙述）
+3. 必须有冲突或张力（人物之间的矛盾、目标阻碍、悬念等）
+4. 保持人物性格一致
+5. 推进情节发展
+6. 使用生动的场景描写和细节
+7. 章节长度：2000-3000字
+8. 用中文写作，使用第三人称叙事"""
 
-        user_message = f"""Write the chapter based on this outline:
+        user_message = f"""请根据以下大纲撰写本章内容：
 
 {outline}
 
-Requirements:
-- Maintain character consistency
-- Follow the plot arc tension
-- Advance active storylines
-- Write engaging, natural prose"""
+关键要求（必须遵守）：
+- 至少2-3个角色出场并互动
+- 必须包含对话场景（不少于3段对话）
+- 必须有明确的冲突或戏剧张力
+- 场景要具体生动，不要空泛叙述
+- 推进主线情节，不要原地踏步
+- 结尾要有悬念或转折
+
+开始撰写："""
 
         return Prompt(system=system_message, user=user_message)
 
