@@ -33,6 +33,14 @@ export interface KnowledgeTriple {
   related_chapters?: number[]
   tags?: string[]
   attributes?: Record<string, any>
+  /** 服务端推断溯源；PUT 时忽略 */
+  provenance?: Array<{
+    id?: string
+    story_node_id?: string | null
+    chapter_element_id?: string | null
+    rule_id: string
+    role?: string
+  }>
 }
 
 export interface StoryKnowledge {

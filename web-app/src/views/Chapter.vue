@@ -109,6 +109,84 @@
               </n-form>
             </n-tab-pane>
 
+            <n-tab-pane name="inference">
+              <template #tab>
+                <span data-testid="chapter-tab-inference">推断证据</span>
+              </template>
+              <n-spin :show="inferenceLoading">
+                <n-space vertical :size="12" style="width: 100%">
+                  <n-alert v-if="inferenceHint" type="info" :title="inferenceHintTitle" style="font-size: 12px">
+                    {{ inferenceHint }}
+                  </n-alert>
+                  <n-space justify="space-between" align="center">
+                    <n-text depth="3" style="font-size: 12px">
+                      来自章节元素自动推断的 <code>chapter_inferred</code> 三元组及证据链
+                    </n-text>
+                    <n-space :size="8">
+                      <n-button
+                        size="tiny"
+                        quaternary
+                        data-testid="chapter-inference-refresh"
+                        :loading="inferenceLoading"
+                        @click="loadInferenceEvidence"
+                      >
+                        刷新
+                      </n-button>
+                      <n-popconfirm @positive-click="revokeAllInference">
+                        <template #trigger>
+                          <n-button
+                            size="tiny"
+                            type="error"
+                            secondary
+                            :disabled="!storyNodeId"
+                            :loading="revokeAllLoading"
+                          >
+                            撤销本章全部推断
+                          </n-button>
+                        </template>
+                        将删除本章节点下的溯源；无剩余证据的推断三元组会被移除。确定？
+                      </n-popconfirm>
+                    </n-space>
+                  </n-space>
+                  <n-empty v-if="!inferenceLoading && !inferenceFacts.length" description="暂无本章推断记录" size="small" />
+                  <n-collapse v-else accordion>
+                    <n-collapse-item
+                      v-for="item in inferenceFacts"
+                      :key="item.fact.id"
+                      :title="`${item.fact.subject} —${item.fact.predicate}→ ${item.fact.object}`"
+                      :name="item.fact.id"
+                    >
+                      <n-space vertical :size="8" style="width: 100%">
+                        <n-descriptions label-placement="left" :column="1" size="small" bordered>
+                          <n-descriptions-item label="ID">{{ item.fact.id }}</n-descriptions-item>
+                          <n-descriptions-item label="置信度">
+                            {{ item.fact.confidence != null ? item.fact.confidence : '—' }}
+                          </n-descriptions-item>
+                        </n-descriptions>
+                        <n-text depth="3" style="font-size: 11px">证据链（rule / 元素行 / role）</n-text>
+                        <ul class="inf-prov-list">
+                          <li v-for="p in item.provenance" :key="p.id">
+                            <code>{{ p.rule_id }}</code>
+                            <span v-if="p.chapter_element_id"> · 元素 {{ p.chapter_element_id }}</span>
+                            · {{ p.role }}
+                          </li>
+                        </ul>
+                        <n-button
+                          size="small"
+                          type="warning"
+                          secondary
+                          :loading="revokingId === item.fact.id"
+                          @click="revokeOneInference(item.fact.id)"
+                        >
+                          撤销此条推断
+                        </n-button>
+                      </n-space>
+                    </n-collapse-item>
+                  </n-collapse>
+                </n-space>
+              </n-spin>
+            </n-tab-pane>
+
             <n-tab-pane name="info" tab="信息">
               <n-space vertical :size="16" class="info-stats">
                 <n-statistic label="字数" :value="wordCount" />
@@ -138,10 +216,11 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
+import { useMessage, useDialog } from 'naive-ui'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { chapterApi } from '../api/chapter'
+import { knowledgeGraphApi, type InferenceFactBundle } from '../api/knowledgeGraph'
 import { useStatsStore } from '../stores/statsStore'
 
 // Status mapping: old API (pending/ok/revise) <-> new API (draft/reviewed/approved)
@@ -166,7 +245,16 @@ const statusToOld = (newStatus: string): string => {
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const dialog = useDialog()
 const statsStore = useStatsStore()
+
+const inferenceLoading = ref(false)
+const inferenceFacts = ref<InferenceFactBundle[]>([])
+const inferenceHint = ref('')
+const inferenceHintTitle = ref('提示')
+const storyNodeId = ref<string | null>(null)
+const revokeAllLoading = ref(false)
+const revokingId = ref<string | null>(null)
 
 const slug = route.params.slug as string
 const chapterId = computed(() => {
@@ -420,6 +508,77 @@ const loadChapter = async () => {
   }
 
   saveStatus.value = 'saved'
+  await loadInferenceEvidence()
+}
+
+const loadInferenceEvidence = async () => {
+  const cid = chapterId.value
+  if (cid === null) return
+  inferenceLoading.value = true
+  inferenceHint.value = ''
+  try {
+    const res = await knowledgeGraphApi.getChapterInferenceEvidence(slug, cid)
+    const d = res.data
+    storyNodeId.value = d.story_node_id
+    inferenceFacts.value = d.facts || []
+    if (d.story_node_id) {
+      inferenceHint.value = ''
+    }
+    if (d.hint) {
+      inferenceHintTitle.value = '无结构节点'
+      inferenceHint.value = d.hint
+    } else if (!d.story_node_id) {
+      inferenceHintTitle.value = '无结构节点'
+      inferenceHint.value = '未匹配到故事结构中的章节节点，推断证据为空。'
+    }
+  } catch (e) {
+    console.error('inference evidence', e)
+    inferenceHintTitle.value = '加载失败'
+    inferenceHint.value = '无法加载推断证据（请确认后端与 SQLite 可用）。'
+    inferenceFacts.value = []
+    storyNodeId.value = null
+  } finally {
+    inferenceLoading.value = false
+  }
+}
+
+const revokeOneInference = (tripleId: string) => {
+  dialog.warning({
+    title: '撤销此条推断',
+    content: '将删除该 chapter_inferred 三元组及其溯源，确定？',
+    positiveText: '撤销',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      revokingId.value = tripleId
+      try {
+        await knowledgeGraphApi.revokeInferredTriple(slug, tripleId)
+        message.success('已撤销')
+        await loadInferenceEvidence()
+      } catch (err: any) {
+        message.error(err?.response?.data?.detail || '撤销失败')
+      } finally {
+        revokingId.value = null
+      }
+      return true
+    },
+  })
+}
+
+const revokeAllInference = async () => {
+  const cid = chapterId.value
+  if (cid === null) return
+  revokeAllLoading.value = true
+  try {
+    const r = await knowledgeGraphApi.revokeChapterInference(slug, cid)
+    message.success(
+      `已处理：删除 ${r.data.deleted_inferred_facts} 条推断三元组（涉及 ${r.data.removed_provenance_triples} 条证据关联）`
+    )
+    await loadInferenceEvidence()
+  } catch (err: any) {
+    message.error(err?.response?.data?.detail || '撤销失败')
+  } finally {
+    revokeAllLoading.value = false
+  }
 }
 
 watch(
@@ -462,6 +621,13 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.inf-prov-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .chapter-spin {
   height: 100vh;
   min-height: 0;

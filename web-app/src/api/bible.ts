@@ -5,6 +5,8 @@ export interface CharacterDTO {
   name: string
   description: string
   relationships: string[]
+  /** AI 生成时的角色定位（主角/配角等） */
+  role?: string
 }
 
 export interface WorldSettingDTO {

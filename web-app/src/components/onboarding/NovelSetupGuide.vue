@@ -36,7 +36,7 @@
               请查看并确认世界观设定和文风公约，下一步将基于此生成人物和地点。
             </n-alert>
 
-            <n-collapse default-expanded-names="worldbuilding">
+            <n-collapse :default-expanded-names="['worldbuilding', 'style']">
               <n-collapse-item title="世界观（5维度框架）" name="worldbuilding">
                 <n-space vertical>
                   <n-card size="small" title="核心法则">
@@ -80,7 +80,7 @@
 
               <n-collapse-item title="文风公约" name="style">
                 <n-card size="small">
-                  {{ bibleData.style || '待生成' }}
+                  <div class="style-convention-text">{{ styleConventionDisplay || '待生成' }}</div>
                 </n-card>
               </n-collapse-item>
             </n-collapse>
@@ -135,57 +135,16 @@
               请查看并确认地点设定。
             </n-alert>
 
-            <n-list bordered>
-              <n-list-item v-for="loc in bibleData.locations" :key="loc.name">
+            <BibleLocationsGraphPreview :locations="bibleData.locations || []" />
+            <n-list bordered style="margin-top: 16px">
+              <n-list-item v-for="loc in bibleData.locations" :key="loc.id || loc.name">
                 <n-thing :title="loc.name" :description="loc.description">
                   <template #header-extra>
-                    <n-tag size="small" type="info">{{ loc.type }}</n-tag>
+                    <n-tag size="small" type="info">{{ loc.location_type || loc.type || '地点' }}</n-tag>
                   </template>
                 </n-thing>
               </n-list-item>
             </n-list>
-          </div>
-        </n-spin>
-      </div>
-
-      <!-- Step 2: Generate Characters -->
-      <div v-else-if="currentStep === 2" class="step-panel">
-        <n-alert v-if="!generatingCharacters && !charactersGenerated" type="info" style="margin-bottom: 16px">
-          点击"生成人物"按钮，AI 将基于世界观生成3-5个主要角色
-        </n-alert>
-        <n-spin :show="generatingCharacters">
-          <div v-if="!charactersGenerated" class="step-info">
-            <n-icon size="48" color="#2080f0">
-              <IconPeople />
-            </n-icon>
-            <h3>{{ generatingCharacters ? '正在生成人物...' : '准备生成人物' }}</h3>
-            <p>基于世界观设定生成主要角色</p>
-          </div>
-          <div v-else class="bible-preview">
-            <n-alert type="success" title="人物生成完成" style="margin-bottom: 16px">
-              人物已生成，下一步将生成完整地图
-            </n-alert>
-          </div>
-        </n-spin>
-      </div>
-
-      <!-- Step 3: Generate Locations -->
-      <div v-else-if="currentStep === 3" class="step-panel">
-        <n-alert v-if="!generatingLocations && !locationsGenerated" type="info" style="margin-bottom: 16px">
-          点击"生成地图"按钮，AI 将基于世界观和人物生成完整地点系统
-        </n-alert>
-        <n-spin :show="generatingLocations">
-          <div v-if="!locationsGenerated" class="step-info">
-            <n-icon size="48" color="#f0a020">
-              <IconMap />
-            </n-icon>
-            <h3>{{ generatingLocations ? '正在生成地图...' : '准备生成地图' }}</h3>
-            <p>基于世界观和人物生成完整地点系统</p>
-          </div>
-          <div v-else class="bible-preview">
-            <n-alert type="success" title="地图生成完成" style="margin-bottom: 16px">
-              地图已生成，可以继续规划故事线
-            </n-alert>
           </div>
         </n-spin>
       </div>
@@ -265,8 +224,78 @@
 
 <script setup lang="ts">
 import { h, ref, watch, computed, onUnmounted } from 'vue'
-import { bibleApi } from '@/api/bible'
+import { bibleApi, type BibleDTO, type StyleNoteDTO } from '@/api/bible'
 import { worldbuildingApi } from '@/api/worldbuilding'
+import BibleLocationsGraphPreview from './BibleLocationsGraphPreview.vue'
+
+const WB_DIMS = ['core_rules', 'geography', 'society', 'culture', 'daily_life'] as const
+
+function emptyWorldbuildingShape(): Record<(typeof WB_DIMS)[number], Record<string, string>> {
+  return {
+    core_rules: {},
+    geography: {},
+    society: {},
+    culture: {},
+    daily_life: {},
+  }
+}
+
+/** 从 Bible.world_settings 名如 core_rules.power_system 还原为五维对象 */
+function worldbuildingFromWorldSettings(
+  settings: { name: string; description?: string }[] | undefined
+): Record<(typeof WB_DIMS)[number], Record<string, string>> {
+  const out = emptyWorldbuildingShape()
+  const dimSet = new Set<string>(WB_DIMS)
+  for (const s of settings || []) {
+    const dot = s.name.indexOf('.')
+    if (dot < 0) continue
+    const dim = s.name.slice(0, dot)
+    const key = s.name.slice(dot + 1)
+    if (!dimSet.has(dim) || !key) continue
+    out[dim as (typeof WB_DIMS)[number]][key] = (s.description || '').trim()
+  }
+  return out
+}
+
+function normalizeWorldbuildingFromApi(raw: Record<string, unknown> | null | undefined) {
+  const out = emptyWorldbuildingShape()
+  if (!raw || typeof raw !== 'object') return out
+  for (const d of WB_DIMS) {
+    const block = raw[d]
+    if (block && typeof block === 'object') {
+      out[d] = { ...(block as Record<string, string>) }
+    }
+  }
+  return out
+}
+
+/** world_settings 打底，API 非空字段覆盖（避免只写入 Bible 时向导全「待生成」） */
+function mergeWorldbuildingDisplay(
+  fromApi: ReturnType<typeof normalizeWorldbuildingFromApi>,
+  fromBibleSettings: ReturnType<typeof worldbuildingFromWorldSettings>
+) {
+  const out = emptyWorldbuildingShape()
+  for (const d of WB_DIMS) {
+    const merged = { ...fromBibleSettings[d], ...fromApi[d] }
+    out[d] = merged
+  }
+  return out
+}
+
+function styleConventionFromBible(bible: BibleDTO | Record<string, unknown>): string {
+  const b = bible as BibleDTO & { style?: string }
+  if (b.style && String(b.style).trim()) return String(b.style).trim()
+  const notes: StyleNoteDTO[] = b.style_notes || []
+  const conv = notes.filter(
+    (n: StyleNoteDTO) => n.category === '文风公约' || (n.category || '').includes('文风')
+  )
+  if (conv.length) return conv.map((n: StyleNoteDTO) => (n.content || '').trim()).filter(Boolean).join('\n\n')
+  if (notes.length)
+    return notes
+      .map((n: StyleNoteDTO) => `[${n.category || '风格'}] ${n.content || ''}`.trim())
+      .join('\n\n')
+  return ''
+}
 
 function formatApiError(error: unknown): string {
   const e = error as {
@@ -349,14 +378,10 @@ const generatingBible = ref(false)
 const bibleGenerated = ref(false)
 const bibleStatusText = ref('正在生成世界观...')
 const bibleError = ref('')
-const bibleData = ref<any>({ style: '' })
-const worldbuildingData = ref<any>({
-  core_rules: {},
-  geography: {},
-  society: {},
-  culture: {},
-  daily_life: {}
-})
+const bibleData = ref<BibleDTO | Record<string, unknown>>({ style_notes: [] } as BibleDTO)
+const worldbuildingData = ref<ReturnType<typeof emptyWorldbuildingShape>>(emptyWorldbuildingShape())
+
+const styleConventionDisplay = computed(() => styleConventionFromBible(bibleData.value as BibleDTO))
 
 // 第2步：生成人物和地点
 const generatingCharacters = ref(false)
@@ -429,18 +454,23 @@ async function startBibleGeneration() {
           generatingBible.value = false
           bibleStatusText.value = '世界观生成完成！'
 
-          // 加载生成的数据
+          // 加载 Bible + 世界观：世界观接口失败时从 Bible.world_settings 回退
           try {
-            const [bible, worldbuilding] = await Promise.all([
-              bibleApi.getBible(props.novelId),
-              worldbuildingApi.getWorldbuilding(props.novelId)
-            ])
+            const bible = await bibleApi.getBible(props.novelId)
             bibleData.value = bible
-            worldbuildingData.value = worldbuilding
+            let fromApi = emptyWorldbuildingShape()
+            try {
+              const w = await worldbuildingApi.getWorldbuilding(props.novelId)
+              fromApi = normalizeWorldbuildingFromApi(w as unknown as Record<string, unknown>)
+            } catch {
+              /* 404 或未落库：仅用 Bible 五维扁平条目 */
+            }
+            const fromWs = worldbuildingFromWorldSettings(bible.world_settings)
+            worldbuildingData.value = mergeWorldbuildingDisplay(fromApi, fromWs)
             bibleGenerated.value = true
           } catch (error: unknown) {
             console.error('Failed to load generated data:', error)
-            bibleGenerated.value = true // 即使加载失败也标记为完成
+            bibleGenerated.value = true
           }
           return
         }
@@ -500,6 +530,7 @@ const handleNext = async () => {
       // 轮询检查人物生成状态
       const checkCharacters = async () => {
         const bible = await bibleApi.getBible(props.novelId)
+        bibleData.value = bible
         if (bible.characters && bible.characters.length > 0) {
           generatingCharacters.value = false
           charactersGenerated.value = true
@@ -521,6 +552,7 @@ const handleNext = async () => {
       // 轮询检查地点生成状态
       const checkLocations = async () => {
         const bible = await bibleApi.getBible(props.novelId)
+        bibleData.value = bible
         if (bible.locations && bible.locations.length > 0) {
           generatingLocations.value = false
           locationsGenerated.value = true
@@ -580,5 +612,11 @@ const handleComplete = () => {
   color: #666;
   line-height: 1.6;
   margin: 8px 0;
+}
+
+.style-convention-text {
+  white-space: pre-wrap;
+  line-height: 1.65;
+  font-size: 14px;
 }
 </style>
