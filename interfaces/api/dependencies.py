@@ -119,6 +119,17 @@ def get_chapter_repository() -> SqliteChapterRepository:
     return SqliteChapterRepository(get_database())
 
 
+def get_chapter_element_repository():
+    """获取章节元素仓储
+
+    Returns:
+        ChapterElementRepository 实例
+    """
+    from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
+    from application.paths import get_db_path
+    return ChapterElementRepository(get_db_path())
+
+
 def get_bible_repository() -> SqliteBibleRepository:
     """获取 Bible 仓储（SQLite 唯一数据源）。"""
     return SqliteBibleRepository(get_database())
@@ -470,6 +481,7 @@ def get_context_builder() -> ContextBuilder:
         plot_arc_repository=get_plot_arc_repository(),
         embedding_service=get_embedding_service(),
         foreshadowing_repository=get_foreshadowing_repository(),
+        chapter_element_repository=get_chapter_element_repository(),
     )
 
 
