@@ -1,6 +1,7 @@
 """Anthropic LLM 提供商实现"""
 import json
 import logging
+import os
 from typing import AsyncIterator
 import httpx
 from anthropic import Anthropic, AsyncAnthropic
@@ -11,6 +12,9 @@ from infrastructure.ai.config.settings import Settings
 from .base import BaseProvider
 
 logger = logging.getLogger(__name__)
+
+# 从环境变量读取模型配置，默认使用 claude-sonnet-4-6
+DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 
 class AnthropicProvider(BaseProvider):
@@ -37,6 +41,9 @@ class AnthropicProvider(BaseProvider):
             "api_key": settings.api_key,
             "timeout": 300.0,  # 5分钟超时
             "max_retries": 5,  # 增加重试次数
+            "default_headers": {
+                "User-Agent": "claude-cli/2.1.87 (external, cli)",
+            },
         }
         if settings.base_url:
             client_kw["base_url"] = settings.base_url
@@ -63,7 +70,7 @@ class AnthropicProvider(BaseProvider):
         try:
             # 使用 async_client 避免阻塞 asyncio 事件循环
             response = await self.async_client.messages.create(
-                model=config.model,
+                model=config.model or DEFAULT_MODEL,
                 temperature=config.temperature,
                 max_tokens=config.max_tokens,
                 system=prompt.system,
@@ -107,10 +114,12 @@ class AnthropicProvider(BaseProvider):
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
+            # 伪造 User-Agent 模拟 claude-cli
+            "User-Agent": "claude-cli/2.1.87 (external, cli)",
         }
 
         payload = {
-            "model": config.model,
+            "model": config.model or DEFAULT_MODEL,
             "max_tokens": config.max_tokens,
             "temperature": config.temperature,
             "system": prompt.system,
