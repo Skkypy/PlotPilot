@@ -503,10 +503,15 @@ def get_vector_store() -> Optional[VectorStore]:
             return ChromaDBVectorStore(persist_directory=persist_dir)
         elif store_type == "qdrant":
             from infrastructure.ai.qdrant_vector_store import QdrantVectorStore
-            host = os.getenv("QDRANT_HOST", "localhost")
-            port = int(os.getenv("QDRANT_PORT", "6333"))
-            api_key = os.getenv("QDRANT_API_KEY")
-            return QdrantVectorStore(host=host, port=port, api_key=api_key)
+            mode = os.getenv("QDRANT_MODE", "local")
+            if mode == "local":
+                storage_path = os.getenv("QDRANT_STORAGE_PATH")
+                return QdrantVectorStore(mode="local", storage_path=storage_path)
+            else:
+                host = os.getenv("QDRANT_HOST", "localhost")
+                port = int(os.getenv("QDRANT_PORT", "6333"))
+                api_key = os.getenv("QDRANT_API_KEY")
+                return QdrantVectorStore(mode="remote", host=host, port=port, api_key=api_key)
         else:
             logger.warning(f"Unknown VECTOR_STORE_TYPE: {store_type}, vector store disabled")
             return None

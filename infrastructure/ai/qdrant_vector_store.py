@@ -1,23 +1,37 @@
 # infrastructure/ai/qdrant_vector_store.py
-from typing import List
+import os
+from typing import List, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from domain.ai.services.vector_store import VectorStore
 
 
 class QdrantVectorStore(VectorStore):
-    """Qdrant 向量存储实现"""
+    """Qdrant 向量存储实现，支持本地文件夹和远程服务模式"""
 
-    def __init__(self, host: str = "localhost", port: int = 6333, api_key: str = None):
+    def __init__(
+        self,
+        mode: str = "local",
+        storage_path: Optional[str] = None,
+        host: str = "localhost",
+        port: int = 6333,
+        api_key: Optional[str] = None
+    ):
         """
         初始化 Qdrant 客户端
 
         Args:
-            host: Qdrant 服务器地址
-            port: Qdrant 服务器端口
-            api_key: Qdrant API 密钥（可选）
+            mode: 连接模式，"local"（本地文件夹）或 "remote"（远程服务）
+            storage_path: 本地模式下的数据存储目录（仅 local 模式）
+            host: 远程模式主机地址
+            port: 远程模式端口
+            api_key: API 密钥（可选）
         """
-        self.client = QdrantClient(host=host, port=port, api_key=api_key)
+        if mode == "local":
+            path = storage_path or os.getenv("QDRANT_STORAGE_PATH", "/Users/owner/.qdrant/storage")
+            self.client = QdrantClient(path=path)
+        else:
+            self.client = QdrantClient(host=host, port=port, api_key=api_key)
 
     async def insert(
         self,

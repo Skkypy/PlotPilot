@@ -38,9 +38,9 @@
 
 ### 环境要求
 
-- Python 3.9+
+- **Python 3.11 / 3.12**（不支持 3.13，PyTorch 尚未支持）
 - Node.js 18+
-- （可选）Docker — 用于启动 Qdrant 向量数据库
+- （可选）Docker — 用于远程 Qdrant 向量数据库
 
 ### 1. 克隆仓库
 
@@ -68,8 +68,16 @@ cp .env.example .env
 
 ### 3. 启动向量数据库（可选）
 
-语义检索功能依赖 Qdrant，若不需要可跳过此步骤。
+语义检索功能依赖 Qdrant，若不需要可跳过此步骤。**推荐使用本地文件夹模式，无需 Docker。**
 
+**本地模式（推荐，无需 Docker）：**
+```bash
+# 配置环境变量即可，Qdrant 会自动创建存储目录
+# QDRANT_MODE=local
+# QDRANT_STORAGE_PATH=./qdrant_storage
+```
+
+**远程模式（需 Docker）：**
 ```bash
 docker compose up -d
 # Qdrant 将运行在 http://localhost:6333
@@ -105,6 +113,8 @@ npm run dev
 
 ## 环境变量参考
 
+### LLM 配置
+
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | 二选一 | Anthropic Claude API 密钥 |
@@ -112,6 +122,28 @@ npm run dev
 | `ARK_BASE_URL` | 否 | Ark API 地址，默认北京节点 |
 | `ARK_MODEL` | 否 | Doubao 模型 ID，默认 `doubao-seed-2-0-mini-260215` |
 | `ANTHROPIC_BASE_URL` | 否 | 自建网关或代理地址 |
+
+### 向量数据库（Qdrant）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `QDRANT_MODE` | `local` | 模式：`local`（本地文件夹）或 `remote`（远程服务） |
+| `QDRANT_STORAGE_PATH` | `./qdrant_storage` | 本地模式数据存储目录 |
+| `QDRANT_HOST` | `localhost` | 远程模式主机地址 |
+| `QDRANT_PORT` | `6333` | 远程模式端口 |
+| `QDRANT_API_KEY` | - | 远程模式 API 密钥 |
+
+### 嵌入模型
+
+| 变量 | 说明 |
+|---|---|
+| `EMBEDDING_MODEL_PATH` | 本地模型路径（下载后设置，如 ModelScope 路径） |
+| `EMBEDDING_SERVICE` | `local`（默认）或 `openai` |
+
+### 其他
+
+| 变量 | 必填 | 说明 |
+|---|---|---|
 | `CORS_ORIGINS` | 否 | 生产环境允许的前端域名，逗号分隔；未设置时仅允许 localhost |
 | `DISABLE_AUTO_DAEMON` | 否 | 设为 `1` 禁止自动驾驶守护进程在启动时自动运行 |
 | `LOG_LEVEL` | 否 | 日志级别，默认 `INFO` |
