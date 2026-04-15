@@ -36,6 +36,18 @@ class NovelService:
         self.chapter_repository = chapter_repository
         self.story_node_repository = story_node_repository
 
+    def _hydrate_chapters(self, novel: Novel) -> Novel:
+        """用 Chapter 仓储补齐 DTO 所需章节列表。"""
+        if self.chapter_repository is None:
+            return novel
+        try:
+            chapters = self.chapter_repository.list_by_novel(novel.novel_id)
+            if isinstance(chapters, list):
+                novel.chapters = chapters
+        except Exception:
+            pass
+        return novel
+
     def ensure_default_act_for_chapters(self, novel_id: str) -> None:
         """若无任何「幕」节点，创建默认第一幕，以便 add_chapter 能挂接章节到叙事结构树。"""
         if not self.story_node_repository:
@@ -94,26 +106,44 @@ class NovelService:
         return NovelDTO.from_domain(novel)
 
     def get_novel(self, novel_id: str) -> Optional[NovelDTO]:
-        """获取小说
-
-        Args:
-            novel_id: 小说 ID
-
-        Returns:
-            NovelDTO 或 None
-        """
         novel = self.novel_repository.get_by_id(NovelId(novel_id))
 
         if novel is None:
             return None
 
-        dto = NovelDTO.from_domain(novel)
+        dto = NovelDTO.from_domain(self._hydrate_chapters(novel))
 
-        # TODO: Implement bible and outline checks for SQLite
-        dto.has_bible = False
-        dto.has_outline = False
+        dto.has_bible = self._check_has_bible(novel_id)
+        dto.has_outline = self._check_has_outline(novel_id)
 
         return dto
+
+    def _check_has_bible(self, novel_id: str) -> bool:
+        storage = getattr(self.novel_repository, "storage", None)
+        if storage is not None and hasattr(storage, "exists"):
+            try:
+                return bool(storage.exists(f"novels/{novel_id}/bible.json"))
+            except Exception:
+                pass
+
+        try:
+            from infrastructure.persistence.database.sqlite_bible_repository import SqliteBibleRepository
+            from infrastructure.persistence.database.connection import get_database
+            bible_repo = SqliteBibleRepository(get_database())
+            bible = bible_repo.get_by_novel_id(NovelId(novel_id))
+            return bible is not None
+        except Exception:
+            return False
+
+    def _check_has_outline(self, novel_id: str) -> bool:
+        if not self.story_node_repository:
+            return False
+        try:
+            tree = self.story_node_repository.get_tree_sync(novel_id)
+            act_nodes = [n for n in tree.nodes if n.node_type == NodeType.ACT]
+            return len(act_nodes) > 0
+        except Exception:
+            return False
 
     def list_novels(self) -> List[NovelDTO]:
         """列出所有小说
@@ -122,7 +152,7 @@ class NovelService:
             NovelDTO 列表
         """
         novels = self.novel_repository.list_all()
-        return [NovelDTO.from_domain(novel) for novel in novels]
+        return [NovelDTO.from_domain(self._hydrate_chapters(novel)) for novel in novels]
 
     def delete_novel(self, novel_id: str) -> None:
         """删除小说
@@ -162,6 +192,8 @@ class NovelService:
 
         # 查询数据库中实际的章节数
         existing_chapters = self.chapter_repository.list_by_novel(NovelId(novel_id))
+        if not isinstance(existing_chapters, list):
+            existing_chapters = list(getattr(novel, "chapters", []) or [])
         expected_number = len(existing_chapters) + 1
 
         # 验证章节号是否连续
@@ -178,6 +210,9 @@ class NovelService:
 
         # 直接保存章节，不通过Novel实体
         self.chapter_repository.save(chapter)
+        if not any(getattr(c, "number", None) == chapter.number for c in novel.chapters):
+            novel.chapters.append(chapter)
+        self.novel_repository.save(novel)
 
         # 同步创建 StoryNode 章节节点，并关联到当前活跃的幕
         if self.story_node_repository:
@@ -226,8 +261,8 @@ class NovelService:
                 logger.warning(f"Failed to sync chapter to story structure: {e}")
 
         # 重新加载Novel以返回最新状态
-        novel = self.novel_repository.get_by_id(NovelId(novel_id))
-        return NovelDTO.from_domain(novel)
+        novel = self.novel_repository.get_by_id(NovelId(novel_id)) or novel
+        return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
     def update_novel(self, novel_id: str, title: Optional[str] = None, author: Optional[str] = None, 
                      target_chapters: Optional[int] = None, premise: Optional[str] = None) -> NovelDTO:
@@ -261,7 +296,7 @@ class NovelService:
             novel.premise = premise
 
         self.novel_repository.save(novel)
-        return NovelDTO.from_domain(novel)
+        return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
     def update_novel_stage(self, novel_id: str, stage: str) -> NovelDTO:
         """更新小说阶段
@@ -283,7 +318,7 @@ class NovelService:
         novel.stage = NovelStage(stage)
         self.novel_repository.save(novel)
 
-        return NovelDTO.from_domain(novel)
+        return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
     def update_auto_approve_mode(self, novel_id: str, auto_approve_mode: bool) -> NovelDTO:
         """更新全自动模式设置
@@ -305,7 +340,7 @@ class NovelService:
         novel.auto_approve_mode = auto_approve_mode
         self.novel_repository.save(novel)
 
-        return NovelDTO.from_domain(novel)
+        return NovelDTO.from_domain(self._hydrate_chapters(novel))
 
     def get_novel_statistics(self, novel_id: str) -> Dict[str, Any]:
         """获取小说统计信息（以 Chapter 仓储落盘为准，与列表/读写 API 一致）
