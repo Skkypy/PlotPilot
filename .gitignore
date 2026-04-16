@@ -25,6 +25,7 @@ build/
 # Local agent / MCP caches (do not commit)
 .playwright-mcp/
 .claude/
+.trae/
 
 # Coverage / test artifacts
 .coverage
@@ -76,3 +77,8 @@ scripts/evaluation/results/
 data/chromadb/
 data/logs/
 data/llm_configs.json
+
+
+PlotPilot-master
+
+llm_profiles.json
