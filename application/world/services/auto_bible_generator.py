@@ -2,7 +2,6 @@
 import logging
 import json
 import uuid
-import sys
 import re
 from typing import Dict, Any
 from datetime import datetime
@@ -15,6 +14,41 @@ from infrastructure.persistence.database.triple_repository import TripleReposito
 from domain.shared.exceptions import EntityNotFoundError
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# JSON 输出稳定性增强 - Prompt 常量
+# ============================================================================
+USER_PROMPT_SUFFIX = """
+
+请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
+```json
+"""
+
+
+def parse_json_from_response(rsp: str):
+    """从LLM响应中解析JSON，支持```json包裹格式"""
+    pattern = r"```json(.*?)```"
+    rsp_json = None
+    try:
+        match = re.search(pattern, rsp, re.DOTALL)
+        if match is not None:
+            try:
+                rsp_json = json.loads(match.group(1).strip())
+            except (json.JSONDecodeError, ValueError):
+                pass
+        else:
+            rsp_json = json.loads(rsp)
+        return rsp_json
+    except json.JSONDecodeError as e:
+        try:
+            match = re.search(r"\{(.*?)\}", rsp, re.DOTALL)
+            if match:
+                content = "{" + match.group(1) + "}"
+                return json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        raise e
 
 
 def _sanitize_llm_json_output(raw: str) -> str:
@@ -120,12 +154,9 @@ def _repair_json_string(text: str) -> str:
 
 
 def _parse_llm_json_to_dict(raw: str) -> Dict[str, Any]:
-    cleaned = _sanitize_llm_json_output(raw)
-    cleaned = _extract_outer_json_object(cleaned)
-    cleaned = _repair_json_string(cleaned)
-    data = json.loads(cleaned)
+    data = parse_json_from_response(raw)
     if not isinstance(data, dict):
-        raise json.JSONDecodeError("Root node is not a JSON object", cleaned, 0)
+        raise json.JSONDecodeError("Root node is not a JSON object", raw, 0)
     return data
 
 
@@ -308,8 +339,7 @@ class AutoBibleGenerator:
                 await self._save_worldbuilding(novel_id, bible_data["worldbuilding"])
 
         elif stage == "worldbuilding":
-            import sys
-            print(f"[DEBUG] Stage worldbuilding - checking Bible record", file=sys.stderr, flush=True)
+            logger.debug("Stage worldbuilding - checking Bible record")
             # 确保Bible记录存在
             try:
                 self.bible_service.get_bible_by_novel(novel_id)
@@ -318,13 +348,11 @@ class AutoBibleGenerator:
                 self.bible_service.create_bible(bible_id, novel_id)
                 logger.info(f"Created Bible record: {bible_id}")
 
-            print(f"[DEBUG] Calling _generate_worldbuilding_and_style", file=sys.stderr, flush=True)
+            logger.debug("Calling _generate_worldbuilding_and_style")
             # 只生成世界观和文风
             bible_data = await self._generate_worldbuilding_and_style(premise, target_chapters)
-            print(f"[DEBUG] _generate_worldbuilding_and_style completed", file=sys.stderr, flush=True)
-            print(f"[DEBUG] bible_data keys: {bible_data.keys()}", file=sys.stderr, flush=True)
-            print(f"[DEBUG] Has 'worldbuilding' key: {'worldbuilding' in bible_data}", file=sys.stderr, flush=True)
-            print(f"[DEBUG] worldbuilding_service is None: {self.worldbuilding_service is None}", file=sys.stderr, flush=True)
+            logger.debug("_generate_worldbuilding_and_style completed, keys=%s", list(bible_data.keys()))
+            logger.debug("Has 'worldbuilding' key: %s, worldbuilding_service is None: %s", 'worldbuilding' in bible_data, self.worldbuilding_service is None)
             # 保存文风
             if "style" in bible_data:
                 style_id = f"{novel_id}-style-1"
@@ -358,6 +386,12 @@ class AutoBibleGenerator:
             # 基于已有世界观生成人物
             existing_worldbuilding = self._load_worldbuilding(novel_id)
             bible_data = await self._generate_characters(premise, target_chapters, existing_worldbuilding)
+            chars_payload = bible_data.get("characters") or []
+            if not chars_payload:
+                raise ValueError(
+                    "角色生成未得到任何人物：多为模型输出非 JSON、截断或解析失败。"
+                    "请确认 AI 控制台模型可用并适当增大超时；也可查看服务端日志中的 LLM 原始片段。"
+                )
             # 保存人物
             character_ids = []
             used_char_ids = set()  # 用于跟踪已使用的人物ID
@@ -404,6 +438,12 @@ class AutoBibleGenerator:
             existing_worldbuilding = self._load_worldbuilding(novel_id)
             existing_characters = self._load_characters(novel_id)
             bible_data = await self._generate_locations(premise, target_chapters, existing_worldbuilding, existing_characters)
+            locs_payload = bible_data.get("locations") or []
+            if not locs_payload:
+                raise ValueError(
+                    "地点生成未得到任何地点：多为模型输出非 JSON、截断或解析失败。"
+                    "请确认 AI 控制台模型可用并适当增大超时；也可查看服务端日志中的 LLM 原始片段。"
+                )
             # 保存地点
             location_ids = []
             for loc_data in self._prepare_locations_for_save(novel_id, bible_data.get("locations", [])):
@@ -441,7 +481,7 @@ class AutoBibleGenerator:
 
         system_prompt = """你是资深网文策划编辑。根据用户提供的故事创意/梗概，生成完整的人物、世界设定和世界观。
 
-**重要：只输出有效的 JSON，不要有任何其他文字。description 字段必须是单行文本，不能有换行符。**
+**重要：description 字段必须是单行文本，不能有换行符。**
 
 要求：
 1. 深入理解故事梗概，提取核心冲突、主题、世界观
@@ -515,9 +555,17 @@ JSON 格式（不要有其他文字）：
 6. 世界观5个维度都要填写，符合故事类型和背景
 7. 适合网文读者，有代入感
 
-只输出 JSON，不要有任何解释文字。"""
+请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
+```json
+{{
+  "characters": [],
+  "locations": [],
+  "style": "",
+  "worldbuilding": {{}}
+}}
+```"""
 
-        bible_data = await self._call_llm_and_parse(system_prompt, user_prompt)
+        bible_data = await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
         if bible_data:
             return bible_data
 
@@ -625,12 +673,12 @@ JSON 格式（不要有其他文字）：
 
     async def _save_worldbuilding(self, novel_id: str, worldbuilding_data: Dict[str, Any]) -> None:
         """保存世界观到数据库（同时保存到Worldbuilding表和Bible的world_settings）"""
-        print(f"[DEBUG] _save_worldbuilding called with data: {worldbuilding_data}", file=sys.stderr, flush=True)
+        logger.debug("_save_worldbuilding called")
 
         # 1. 保存到Worldbuilding表（用于后续生成人物和地点时读取）
         if self.worldbuilding_service:
             try:
-                print(f"[DEBUG] Calling worldbuilding_service.update_worldbuilding", file=sys.stderr, flush=True)
+                logger.debug("Calling worldbuilding_service.update_worldbuilding")
                 self.worldbuilding_service.update_worldbuilding(
                     novel_id=novel_id,
                     core_rules=worldbuilding_data.get("core_rules"),
@@ -639,15 +687,14 @@ JSON 格式（不要有其他文字）：
                     culture=worldbuilding_data.get("culture"),
                     daily_life=worldbuilding_data.get("daily_life")
                 )
-                print(f"[DEBUG] Worldbuilding saved to Worldbuilding table", file=sys.stderr, flush=True)
+                logger.debug("Worldbuilding saved to Worldbuilding table")
                 logger.info(f"Worldbuilding saved for {novel_id}")
             except Exception as e:
-                print(f"[DEBUG] Failed to save worldbuilding: {e}", file=sys.stderr, flush=True)
-                logger.error(f"Failed to save worldbuilding: {e}")
+                logger.error("Failed to save worldbuilding: %s", e)
 
         # 2. 同时保存到Bible的world_settings（用于前端显示）
         try:
-            print(f"[DEBUG] Saving worldbuilding to Bible.world_settings", file=sys.stderr, flush=True)
+            logger.debug("Saving worldbuilding to Bible.world_settings")
             bible = self.bible_service.get_bible_by_novel(novel_id)
             if not bible:
                 bible_id = f"{novel_id}-bible"
@@ -671,35 +718,79 @@ JSON 格式（不要有其他文字）：
         except Exception as e:
             logger.error(f"Failed to save to Bible.world_settings: {e}")
 
-    def _load_worldbuilding(self, novel_id: str) -> Dict[str, Any]:
-        """加载已有世界观"""
-        if not self.worldbuilding_service:
-            return {}
+    def _worldbuilding_dict_nonempty(self, data: Dict[str, Any]) -> bool:
+        for block in data.values():
+            if not isinstance(block, dict):
+                continue
+            if any(str(v).strip() for v in block.values()):
+                return True
+        return False
+
+    def _worldbuilding_from_bible_world_settings(self, novel_id: str) -> Dict[str, Any]:
+        """从 Bible.world_settings 的「维度.键」扁平名还原五维 dict（与向导第 1 步写入格式一致）。"""
+        dims: Dict[str, Dict[str, str]] = {
+            "core_rules": {},
+            "geography": {},
+            "society": {},
+            "culture": {},
+            "daily_life": {},
+        }
+        dim_keys = frozenset(dims.keys())
         try:
-            wb = self.worldbuilding_service.get_worldbuilding(novel_id)
-            return {
-                "core_rules": wb.core_rules,
-                "geography": wb.geography,
-                "society": wb.society,
-                "culture": wb.culture,
-                "daily_life": wb.daily_life
-            }
-        except:
+            bible = self.bible_service.get_bible(novel_id)
+        except Exception:
             return {}
+        if bible is None:
+            return {}
+        for s in bible.world_settings or []:
+            name = (getattr(s, "name", None) or "").strip()
+            dot = name.find(".")
+            if dot < 0:
+                continue
+            dim, key = name[:dot], name[dot + 1 :].strip()
+            if dim not in dim_keys or not key:
+                continue
+            desc = (getattr(s, "description", None) or "").strip()
+            dims[dim][key] = desc
+        return dims
+
+    def _load_worldbuilding(self, novel_id: str) -> Dict[str, Any]:
+        """加载已有世界观：优先 worldbuilding 表，若为空则回退 Bible.world_settings（避免第 1 步只落 Bible 时角色步拿到「无」）。"""
+        merged: Dict[str, Any] = {}
+        if self.worldbuilding_service:
+            try:
+                wb = self.worldbuilding_service.get_worldbuilding(novel_id)
+                if wb is not None:
+                    merged = {
+                        "core_rules": dict(wb.core_rules),
+                        "geography": dict(wb.geography),
+                        "society": dict(wb.society),
+                        "culture": dict(wb.culture),
+                        "daily_life": dict(wb.daily_life),
+                    }
+            except Exception:
+                merged = {}
+
+        if self._worldbuilding_dict_nonempty(merged):
+            return merged
+
+        from_bible = self._worldbuilding_from_bible_world_settings(novel_id)
+        if self._worldbuilding_dict_nonempty(from_bible):
+            return from_bible
+
+        return merged
 
     def _load_characters(self, novel_id: str) -> list:
         """加载已有人物"""
         try:
             bible = self.bible_service.get_bible(novel_id)
             return [{"name": c.name, "description": c.description} for c in bible.characters]
-        except:
+        except Exception:
             return []
 
     async def _generate_worldbuilding_and_style(self, premise: str, target_chapters: int) -> Dict[str, Any]:
         """只生成世界观和文风"""
         system_prompt = """你是资深网文策划编辑。根据故事创意生成世界观和文风公约。
-
-**重要：只输出有效的 JSON，不要有任何其他文字。**
 
 要求：
 1. 完整的世界观（5维度框架）：核心法则、地理生态、社会结构、历史文化、沉浸感细节
@@ -743,9 +834,17 @@ JSON 格式：
 
 目标章节数：{target_chapters}章
 
-请生成世界观和文风公约。只输出 JSON，不要有任何解释文字。"""
+请生成世界观和文风公约。
 
-        return await self._call_llm_and_parse(system_prompt, user_prompt)
+请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
+```json
+{{
+  "style": "",
+  "worldbuilding": {{}}
+}}
+```"""
+
+        return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
 
     async def _generate_characters(self, premise: str, target_chapters: int, worldbuilding: Dict[str, Any]) -> Dict[str, Any]:
         """基于世界观生成人物"""
@@ -753,7 +852,7 @@ JSON 格式：
 
         system_prompt = """你是资深网文策划编辑。基于已有世界观生成主要人物。
 
-**重要：只输出有效的 JSON，不要有任何其他文字。description 字段必须是单行文本。**
+**重要：description 字段必须是单行文本。**
 
 要求：
 1. 至少 3-5 个主要人物（主角、配角、对手、导师等）
@@ -785,9 +884,16 @@ JSON 格式：
 已有世界观：
 {wb_summary}
 
-请基于这个世界观生成主要人物。只输出 JSON，不要有任何解释文字。"""
+请基于这个世界观生成主要人物。
 
-        return await self._call_llm_and_parse(system_prompt, user_prompt)
+请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
+```json
+{{
+  "characters": []
+}}
+```"""
+
+        return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
 
     async def _generate_locations(self, premise: str, target_chapters: int, worldbuilding: Dict[str, Any], characters: list) -> Dict[str, Any]:
         """基于世界观和人物生成地点"""
@@ -795,8 +901,6 @@ JSON 格式：
         char_summary = "\n".join([f"- {c['name']}: {c['description'][:50]}..." for c in characters])
 
         system_prompt = """你是资深网文策划编辑。基于已有世界观和人物生成完整地图。
-
-**重要：只输出有效的 JSON，不要有任何其他文字。**
 
 要求：
 1. 至少 5-10 个重要地点，构成完整地图
@@ -833,9 +937,16 @@ JSON 格式：
 已有人物：
 {char_summary}
 
-请基于世界观和人物生成完整地图。只输出 JSON，不要有任何解释文字。"""
+请基于世界观和人物生成完整地图。
 
-        return await self._call_llm_and_parse(system_prompt, user_prompt)
+请按照以下json格式进行输出，可以被Python json.loads函数解析。只给出JSON，不作解释，不作答：
+```json
+{{
+  "locations": []
+}}
+```"""
+
+        return await self._call_llm_and_parse_with_retry(system_prompt, user_prompt)
 
     def _summarize_worldbuilding(self, wb: Dict[str, Any]) -> str:
         """总结世界观为文本"""
@@ -865,6 +976,41 @@ JSON 格式：
             logger.error(f"Raw content (first 1000 chars): {content[:1000]}")
             logger.error(f"Raw content (last 500 chars): {content[-500:]}")
             return {}
+
+    async def _call_llm_and_parse_with_retry(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_retries: int = 3,
+    ) -> Dict[str, Any]:
+        """带重试的 LLM 调用；总尝试次数不超过 LLM_MAX_TOTAL_ATTEMPTS。"""
+        from application.ai.llm_retry_policy import LLM_MAX_TOTAL_ATTEMPTS
+
+        last_error = None
+        attempts = min(max_retries, LLM_MAX_TOTAL_ATTEMPTS)
+
+        for attempt in range(attempts):
+            try:
+                if attempt == 0:
+                    # 第一次尝试，使用标准prompt
+                    return await self._call_llm_and_parse(system_prompt, user_prompt)
+                else:
+                    # 重试时加强调prompt
+                    retry_reminder = "\n\n【重要提醒】上次JSON解析失败，请严格遵守JSON输出规则！只输出纯JSON，不要任何其他文字！"
+                    logger.warning(f"JSON解析重试 {attempt}/{attempts}，添加强调提示")
+                    return await self._call_llm_and_parse(
+                        system_prompt + retry_reminder,
+                        user_prompt
+                    )
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(f"JSON解析失败，重试 {attempt + 1}/{attempts}")
+            except Exception as e:
+                last_error = e
+                logger.warning(f"LLM调用异常，重试 {attempt + 1}/{attempts}: {e}")
+
+        logger.error(f"所有重试都失败，返回空字典")
+        return {}
 
     async def _generate_character_triples(self, novel_id: str, character_ids: list):
         """从人物关系生成三元组"""

@@ -38,10 +38,14 @@ setup_logging(level=log_level, log_file=log_file)
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
+from starlette.requests import Request
 import threading
 import multiprocessing
+import signal
 
 # Core module
 from interfaces.api.v1.core import novels, chapters, scene_generation_routes, settings as llm_settings, export
@@ -76,12 +80,18 @@ from interfaces.api.stats.services.stats_service import StatsService
 from interfaces.api.stats.repositories.sqlite_stats_repository_adapter import SqliteStatsRepositoryAdapter
 from infrastructure.persistence.database.connection import get_database
 
-# 后端版本号（每次重启递增）
-BACKEND_VERSION = datetime.now().strftime("%Y%m%d-%H%M%S")
+# 产品发布版本（与前端 / 安装包一致）
+APP_RELEASE_VERSION = "1.0.2"
+# 构建标识（与安装包/发布说明一致，便于对账）
+BACKEND_BUILD_ID = "build-20260209-1200-c4d2"
 STARTUP_TIME = time.time()
 
 logger.info("=" * 80)
-logger.info(f"🚀 BACKEND STARTING - Version: {BACKEND_VERSION}")
+logger.info(
+    "🚀 BACKEND STARTING - Release %s (build %s)",
+    APP_RELEASE_VERSION,
+    BACKEND_BUILD_ID,
+)
 logger.info(f"   Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 logger.info(f"   Log Level: {logging.getLevelName(log_level)}")
 logger.info(f"   Log File: {log_file}")
@@ -91,10 +101,24 @@ logger.info("=" * 80)
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title="aitext API",
-    version="2.0.0",
-    description="AI 小说创作平台 API"
+    title="PlotPilot API",
+    version="1.0.2",
+    description="PlotPilot（墨枢）AI 小说创作平台 API",
+    redirect_slashes=True,  # 自动将 /api/v1/novels 重定向到 /api/v1/novels/
 )
+
+# ── 前端静态文件托管 ──
+_FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+if _FRONTEND_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIR / "assets")), name="frontend-assets")
+    # favicon 等根级静态资源
+    _favicon = _FRONTEND_DIR / "favicon.svg"
+    if _favicon.exists():
+        app.get("/favicon.svg", include_in_schema=False, response_class=FileResponse)(
+            lambda: FileResponse(str(_favicon), media_type="image/svg+xml")
+        )
+    # SPA fallback: 所有非 API 路径都返回 index.html
+    _INDEX_HTML = _FRONTEND_DIR / "index.html"
 
 # 修复反向代理场景下 trailing slash 重定向使用后端本地地址的 bug
 # 当 FastAPI 的 trailing slash 重定向指向 127.0.0.1 时，
@@ -135,17 +159,65 @@ async def startup_event():
     # 启动自动驾驶守护进程（后台线程）
     _start_autopilot_daemon_thread()
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭事件"""
-    # 停止守护进程线程
+def _checkpoint_sqlite_wal_safe() -> None:
+    """桌面端优雅退出时尽量将 WAL 落盘，降低异常断电时的损坏概率。"""
+    try:
+        import sqlite3
+
+        from application.paths import get_db_path
+
+        dbp = get_db_path()
+        conn = sqlite3.connect(dbp, timeout=15.0)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("WAL checkpoint 失败（可忽略）: %s", e)
+
+
+def _run_backend_shutdown_hooks() -> None:
+    """与 shutdown 生命周期钩子共用：守护进程停止 + WAL + 日志。"""
     _stop_autopilot_daemon_thread()
-    
+    _checkpoint_sqlite_wal_safe()
+
     uptime = time.time() - STARTUP_TIME
     logger.info("=" * 80)
-    logger.info(f"🛑 BACKEND SHUTTING DOWN")
-    logger.info(f"   Total uptime: {uptime:.2f} seconds ({uptime/3600:.2f} hours)")
+    logger.info("🛑 BACKEND SHUTTING DOWN")
+    logger.info("   Total uptime: %.2f seconds (%.2f hours)", uptime, uptime / 3600)
     logger.info("=" * 80)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭事件（uvicorn 优雅退出时触发；Windows 桌面专用路径见 /internal/shutdown）。"""
+    _run_backend_shutdown_hooks()
+
+
+def _assert_internal_shutdown_localhost(request: Request) -> None:
+    if not request.client:
+        raise HTTPException(status_code=403, detail="forbidden")
+    host = request.client.host or ""
+    if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+
+def _internal_shutdown_after_response() -> None:
+    """HTTP 响应已发出后再触发进程级退出，避免截断响应体。"""
+    time.sleep(0.15)
+    if os.name == "nt":
+        _run_backend_shutdown_hooks()
+        logging.shutdown()
+        os._exit(0)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+@app.post("/internal/shutdown", include_in_schema=False)
+async def internal_shutdown(request: Request):
+    """仅本机：供 Tauri 在关闭窗口前触发优雅停机（Unix 走 SIGINT→uvicorn；Windows 走钩子+_exit）。"""
+    _assert_internal_shutdown_localhost(request)
+    threading.Thread(target=_internal_shutdown_after_response, daemon=True).start()
+    return {"ok": True, "message": "shutting down"}
 
 # 守护进程进程管理（使用独立进程避免阻塞主事件循环）
 _daemon_process = None
@@ -182,7 +254,13 @@ def _stop_all_running_novels():
         
         conn = sqlite3.connect(str(db_path_obj), timeout=10.0)
         try:
-            # 检查有多少运行中的小说
+            cur = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='novels' LIMIT 1"
+            )
+            if cur.fetchone() is None:
+                logger.info("ℹ️  新库尚无 novels 表，跳过运行中小说复位")
+                return
+
             cursor = conn.execute(
                 "SELECT COUNT(*) FROM novels WHERE autopilot_status = 'running'"
             )
@@ -327,15 +405,13 @@ def restart_autopilot_daemon():
 
 
 # 配置 CORS
-# 生产环境请将 CORS_ORIGINS 环境变量设置为允许的域名列表，逗号分隔
-# 例如：CORS_ORIGINS=https://yourapp.com,https://www.yourapp.com
-# 未设置时默认仅允许 localhost（开发模式）
+# 前后端同端口部署：前端是同源请求，默认允许所有源。
+# 开发环境可通过 CORS_ORIGINS 环境变量限制。
 _cors_origins_env = os.getenv("CORS_ORIGINS", "")
 if _cors_origins_env:
     _allowed_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
 else:
-    _allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000",
-                        "http://localhost:5173", "http://127.0.0.1:5173"]
+    _allowed_origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -401,12 +477,10 @@ app.include_router(stats_router, prefix="/api/stats", tags=["statistics"])
 
 @app.get("/")
 async def root():
-    """根路径
-
-    Returns:
-        欢迎消息
-    """
-    return {"message": "aitext API v2.0"}
+    """根路径 — 返回前端页面（SPA）或 API 欢迎消息"""
+    if _FRONTEND_DIR.exists() and _INDEX_HTML.exists():
+        return FileResponse(str(_INDEX_HTML), media_type="text/html")
+    return {"message": "PlotPilot API", "release": APP_RELEASE_VERSION}
 
 
 @app.get("/health")
@@ -420,13 +494,36 @@ async def health_check():
     daemon_alive = _daemon_process is not None and _daemon_process.is_alive()
     return {
         "status": "healthy",
-        "version": BACKEND_VERSION,
+        "version": APP_RELEASE_VERSION,
+        "build_id": BACKEND_BUILD_ID,
         "uptime_seconds": round(uptime, 2),
         "daemon_process": {
             "running": daemon_alive,
             "pid": _daemon_process.pid if _daemon_process else None
         }
     }
+
+
+# ── SPA fallback：前端路由兜底（必须在 API 路由之后注册）──
+if _FRONTEND_DIR.exists() and _INDEX_HTML.exists():
+    @app.get("/{full_path:path}", include_in_schema=False)
+    @app.post("/{full_path:path}", include_in_schema=False)
+    @app.put("/{full_path:path}", include_in_schema=False)
+    @app.patch("/{full_path:path}", include_in_schema=False)
+    @app.delete("/{full_path:path}", include_in_schema=False)
+    async def spa_fallback(full_path: str, req: Request):
+        """SPA fallback — 所有未匹配的路径返回 index.html"""
+        # 排除 API 路径、统计路由和静态资源
+        if (full_path.startswith("api/") or full_path.startswith("stats/")
+                or full_path.startswith("assets/") or full_path.startswith("_")):
+            # 对无尾部斜杠的 API 路径做 307 重定向到带斜杠版本
+            if not full_path.endswith('/'):
+                redirect_url = req.url.path + '/'
+                if req.url.query:
+                    redirect_url += '?' + req.url.query
+                return RedirectResponse(url=redirect_url, status_code=307)
+            return JSONResponse({"error": "Not Found"}, status_code=404)
+        return FileResponse(str(_INDEX_HTML), media_type="text/html")
 
 
 if __name__ == "__main__":
