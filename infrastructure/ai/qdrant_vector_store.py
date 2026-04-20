@@ -28,7 +28,7 @@ class QdrantVectorStore(VectorStore):
             api_key: API 密钥（可选）
         """
         if mode == "local":
-            path = storage_path or os.getenv("QDRANT_STORAGE_PATH", "/Users/owner/.qdrant/storage")
+            path = storage_path or os.getenv("QDRANT_STORAGE_PATH", "~/.qdrant/storage")
             self.client = QdrantClient(path=path)
         else:
             self.client = QdrantClient(host=host, port=port, api_key=api_key)
